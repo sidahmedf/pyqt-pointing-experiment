@@ -1,0 +1,488 @@
+---
+title: "TP 3 IHM :  Analyse des logs avec R"
+author: "Sid Ahmed Ferroudj"
+date: "2026-04-22"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Introduction 
+
+Dans le domaine de l'Interaction Homme-Machine (IHM), l'optimisation des temps de pointage est un enjeu majeur pour l'ergonomie des interfaces. Historiquement modélisée par la loi de Fitts, la difficulté de sélection d'une cible dépend directement de sa taille et de sa distance.
+
+Ce document présente l'analyse des résultats d'une expérience visant à comparer trois techniques de pointage : un curseur classique (Normal) et deux techniques dites target-agnostic basées sur l'algorithme de Voronoï (Bubble Cursor et Rope Cursor). L'objectif de cette étude est d'évaluer la performance de ces techniques (temps de sélection) en fonction de deux variables environnementales : la taille des cibles et la densité des distracteurs à l'écran
+
+
+## Préparation des données
+
+On commence par charger les données :
+
+```{r init-data, message=FALSE, warning=FALSE}
+library(tidyverse)
+
+data <- read.csv2("data.csv", sep=",", dec=".")
+
+summary(data)
+
+```
+
+Ensuite on allons marquer les colonnes adéquates comme des facteurs
+
+```{r}
+data$User = factor(data$User)
+data$Technique = factor(data$Technique)
+data$Density = factor(data$Density)
+data$Size = factor(data$Size)
+data$Repetition = factor(data$Repetition)
+data$Target_ID = factor(data$Target_ID)
+summary(data)
+nrow(data)
+```
+
+**Analyse initiale des données**
+
+Après avoir chargé les données, on convertit les variables indépendantes (`User`, `Technique`, `Density`, `Size`, `Repetition` et `Target_ID`) en facteurs, afin que R les traite comme des variables catégorielles dans l'analyse.
+
+L'affichage du `summary` et du nombre de lignes permet de vérifier l'intégrité du jeu de données :
+
+- **Plan expérimental équilibré :** On compte bien 5040 essais au total, répartis entre 7 utilisateurs (720 essais chacun). Chaque modalité est représentée de façon égale (1680 essais par technique, 2520 essais par densité et par taille de cible).
+- **Aperçu des performances :** Le temps de sélection médian est cohérent (environ 1061 ms). En revanche, le temps maximum est très élevé (près de 32 secondes) et certains essais contiennent jusqu'à 11 erreurs. Cela indique qu'un filtrage des outliers et des essais erronés sera nécessaire avant d'analyser les temps de réaction.
+
+### Vérification de l'intégrité des données
+Avant de continuer l'analyse, on vérifie que le plan expérimental est bien équilibré : nombre total d'observations, et répartition des essais par modalité (utilisateur, technique, densité, etc.). L'objectif est de s'assurer qu'aucune donnée n'a été perdue ou dupliquée.
+
+```{r}
+nrow(data)  
+
+table(data$User)        
+table(data$Technique)   
+table(data$Density)     
+table(data$Size)        
+table(data$Repetition)  
+
+table(data$User, data$Technique)
+
+stopifnot(nrow(data) == 5040) 
+stopifnot(all(table(data$User) == 720))
+```
+
+
+Les tests `stopifnot` passent sans erreur, ce qui confirme que le jeu de données est complet. On a bien 5040 essais au total, et chaque utilisateur a complété exactement 720 essais, avec une répartition symétrique entre toutes les conditions. On peut passer au filtrage.
+
+### Filtrage des erreurs et des outliers
+
+Pour ne pas fausser l'analyse, on nettoie le jeu de données en deux étapes. D'abord, on retire tous les essais où l'utilisateur a fait une erreur, car le temps de ces essais ne reflète pas une performance de pointage normale. Ensuite, on filtre les outliers : certains essais peuvent durer anormalement longtemps (par exemple si l'utilisateur a été distrait). On applique une méthode classique en IHM : on exclut tous les temps de sélection supérieurs à la moyenne plus trois fois l'écart-type. Enfin, on supprime les colonnes qui ne servent plus pour l'analyse des temps (`Target_ID`, `Timestamp`, `Errors`).
+```{r}
+nrow_before <- nrow(data)
+
+# On filtre d'abord les erreurs
+data <- data %>%
+  filter(as.numeric(Errors) == 0)
+
+# On calcule la limite pour les outliers (Moyenne + 3 * Ecart-type)
+mean_time <- mean(data$Time_ms)
+sd_time <- sd(data$Time_ms)
+upper_bound <- mean_time + (3 * sd_time)
+
+#On filtre les outliers et on retire les colonnes inutiles
+data <- data %>%
+  filter(Time_ms <= upper_bound) %>%
+  select(!c(Target_ID, Timestamp, Errors))
+
+nrow_after <- nrow(data)
+  
+cat("Lignes avant filtrage :", nrow_before, "\n")
+cat("Lignes après filtrage :", nrow_after, "\n")
+cat("Lignes supprimées (erreurs + outliers) :", nrow_before - nrow_after, "\n")
+cat("Pourcentage de données supprimées :", round((nrow_before - nrow_after) / nrow_before * 100, 1), "%\n")
+
+summary(data)
+```
+
+
+**Ce que l'on observe :**
+
+Après le filtrage, le temps maximum de sélection est redescendu à 4.7 secondes, ce qui est une valeur réaliste pour un essai difficile. En revanche, le jeu de données n'est plus équilibré. Par exemple, il ne reste que 1093 essais valides pour la technique `Normal`, contre 1502 pour `Rope` et 1440 pour `Bubble`. De même, il reste moins d'essais pour les petites cibles (Taille 8 : 1935 essais) que pour les grandes (Taille 18 : 2100 essais). Les utilisateurs n'ont pas non plus le même nombre d'essais restants (499 pour l'utilisateur 1, contre 682 pour l'utilisateur 4).
+
+**Explications :**
+
+Ce déséquilibre est attendu et s'explique directement par le filtrage des erreurs :
+
+- **Les techniques :** La technique `Normal` oblige l'utilisateur à cliquer précisément dans les limites de la cible, ce qui génère plus d'erreurs. Les techniques `Bubble` et `Rope` sont *target agnostic* : elles sélectionnent la cible la plus proche, ce qui rend le pointage moins strict et réduit le taux d'erreur.
+- **La taille des cibles :** Conformément à la loi de Fitts, une petite cible (Taille 8) est plus difficile à atteindre et génère plus d'erreurs qu'une grande cible (Taille 18).
+- **Les utilisateurs :** La différence du nombre d'essais restants entre participants reflète des stratégies différentes : certains ont privilégié la vitesse au détriment de la précision, d'autres ont été plus prudents.
+
+
+## 3. Analyse des résultats
+
+### Différence de temps de réponse entre participants
+```{r}
+g_participants <- ggplot(data = data, aes(x = User, y = Time_ms, fill = User)) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Set2") +
+  theme_minimal()
+
+g_participants <- g_participants +
+  theme(legend.position = "none")
+
+g_participants <- g_participants +
+  labs(
+    title = "Temps de réponse par participant",
+    x = "Participant",
+    y = "Temps de réponse (ms)"
+  )
+
+g_participants
+```
+
+
+**Ce que l'on observe :**
+
+Le boxplot montre des différences visibles entre les participants. Les temps médians varient légèrement, en restant globalement autour de 1000 ms. L'utilisateur 1 se distingue avec la médiane la plus basse et une boîte assez resserrée (faible écart interquartile). Les utilisateurs 3, 5 et 7 ont des boîtes plus étirées vers le haut. On remarque aussi, pour tous les participants, un nombre important de points aberrants au-dessus de la moustache supérieure (jusqu'à environ 4700 ms), alors que la limite basse est très uniforme et se situe autour de 350-400 ms.
+
+**Explications :**
+
+- **Compromis vitesse-précision (Speed-Accuracy Tradeoff) :** La variabilité entre participants est normale. L'utilisateur 1 a probablement adopté une stratégie axée sur la vitesse, tandis que d'autres ont été plus prudents dans leurs mouvements pour éviter les erreurs, ce qui élargit leur distribution.
+- **Asymétrie des temps de réaction :** La limite basse uniforme s'explique par le temps de réaction humain minimal : on ne peut pas pointer instantanément. En revanche, les points élevés au-dessus des moustaches sont typiques d'une distribution asymétrique (log-normale). Une légère hésitation, un recadrage de la souris ou le temps de chercher visuellement la prochaine cible peuvent facilement allonger un essai, même après avoir filtré les outliers les plus extrêmes.
+
+### Effet d'apprentissage ou de fatigue entre blocs
+```{r}
+g_repetitions <- ggplot(data = data, aes(x = Repetition, y = Time_ms, fill = Repetition)) + 
+  geom_boxplot() + 
+  theme_minimal()
+
+g_repetitions.2 <- g_repetitions +
+  theme(legend.position = "none")
+
+g_repetitions.3 <- g_repetitions.2 +
+  labs(
+    title = "Évolution du temps de réponse par répétition",
+    x = "Répétition (Bloc)",
+    y = "Temps de réponse (ms)"
+  )
+
+g_repetitions
+```
+
+```{r}
+data_rep_summary <- data %>%
+  group_by(Repetition) %>%
+  summarise(mean_time = mean(Time_ms), se = sd(Time_ms)/sqrt(n()))
+
+g_rep_line <- ggplot(data_rep_summary, aes(x = Repetition, y = mean_time, group = 1)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue", size = 3) +
+  theme_minimal()
+
+g_rep_line <- g_rep_line +
+  geom_errorbar(aes(ymin = mean_time - se, ymax = mean_time + se), width = 0.2)
+
+g_rep_line <- g_rep_line +
+  labs(
+    title = "Évolution du temps de réponse moyen par répétition",
+    x = "Répétition (Bloc)",
+    y = "Temps de réponse moyen (ms)"
+  )
+
+g_rep_line
+
+```
+
+**Ce que l'on observe :**
+
+Les deux graphiques montrent que les temps de réponse sont très stables d'un bloc à l'autre. Les médianes varient peu (environ 948 ms, 950 ms et 976 ms pour les répétitions 1, 2 et 3). Sur la courbe des moyennes, l'écart entre le bloc le plus rapide et le plus lent est inférieur à 40 ms (environ 1216 ms contre 1254 ms). Les barres d'erreur se chevauchent largement, ce qui indique que ces variations sont négligeables.
+
+**Explications :**
+
+- **Absence d'effet d'apprentissage :** Malgré l'introduction de techniques non-standards (`Bubble Cursor` et `Rope Cursor`), les utilisateurs n'ont pas eu besoin de temps d'adaptation. Ces techniques sont basées sur la distance et restent intuitives, ce qui fait que la performance est stable dès le premier bloc.
+- **Absence d'effet de fatigue :** L'expérience ne comportait que 3 blocs, ce qui est suffisamment court pour ne pas générer de fatigue motrice chez les participants. Les temps de sélection restent donc constants jusqu'à la fin.
+
+
+### Différence de temps de réponse entre techniques
+```{r}
+g_techniques <- ggplot(data = data, aes(x = Technique, y = Time_ms, fill = Technique)) + 
+  geom_boxplot() + 
+  scale_fill_brewer(palette = "Set2") +
+  theme_minimal()
+
+g_techniques <- g_techniques + 
+  theme(legend.position = "none")
+
+g_techniques <- g_techniques + 
+  labs(
+    title = "Temps de réponse par technique",
+    x = "Technique de pointage",
+    y = "Temps de réponse (ms)"
+  )
+
+g_techniques
+```
+
+
+**Ce que l'on observe :**
+
+Le boxplot montre un écart important entre la technique classique (`Normal`) et les deux autres (`Bubble` et `Rope`). La boîte de `Normal` est positionnée bien plus haut sur l'axe des ordonnées, avec une médiane qui dépasse 1300 ms. Sa boîte est aussi plus étendue verticalement, ce qui reflète une forte variabilité des temps de réponse d'un essai à l'autre.
+
+Les techniques `Bubble` et `Rope` ont des distributions beaucoup plus proches l'une de l'autre. Leurs médianes se situent autour de 800 ms, leurs boîtes sont plus resserrées (moins de variance), et elles se superposent presque entièrement. La différence entre ces deux techniques est donc très faible sur le plan des temps de réponse.
+
+**Explications :**
+
+- **Lenteur de la technique `Normal` (loi de Fitts) :** Avec un curseur classique, l'utilisateur doit amener le pointeur physiquement à l'intérieur des limites de la cible. Cette contrainte de précision l'oblige à ralentir en fin de mouvement pour ajuster sa position (phase de décélération), ce qui allonge le temps de pointage. La forte dispersion s'explique par le fait que certains essais demandent plus d'ajustements fins que d'autres selon la position de départ et la taille de la cible.
+- **Efficacité des techniques basées sur la distance :** `Bubble` et `Rope` sélectionnent automatiquement la cible la plus proche du curseur. En termes d'IHM, cela revient à agrandir la taille effective de la cible jusqu'aux frontières de Voronoï. D'après la loi de Fitts, une taille de cible plus grande réduit l'indice de difficulté (ID), ce qui permet des mouvements plus rapides et plus directs, sans besoin de décélération précise en fin de trajectoire.
+- **Absence de différence entre `Bubble` et `Rope` :** Le fait que ces deux techniques aient des performances très similaires montre que la forme du retour visuel (un cercle pour `Bubble`, une ligne pour `Rope`) n'a pas d'impact sur le temps de réponse. La mécanique de sélection sous-jacente étant identique dans les deux cas, les utilisateurs sont aussi rapides avec l'une ou l'autre.
+
+### Différence de temps de réponse selon la densité des cibles
+
+```{r}
+g_densities <- ggplot(data = data, aes(x = Density, y = Time_ms, fill = Density)) + 
+  geom_boxplot() + 
+    scale_fill_brewer(palette = "Blues") +
+  theme_minimal()
+
+g_densities <- g_densities + 
+  theme(legend.position = "none")
+
+g_densities <- g_densities + 
+  labs(
+    title = "Temps de réponse selon la densité des cibles",
+    x = "Densité (Nombre de cibles à l'écran)",
+    y = "Temps de réponse (ms)"
+  )
+
+g_densities
+
+
+#g_densities_jitter <- g_densities +
+ # geom_jitter(width = 0.15, alpha = 0.15, size = 1)
+
+#g_densities_jitter
+```
+
+
+
+**Ce que l'on observe :**
+
+Les deux boxplots montrent que la distribution pour la densité 90 est globalement décalée vers le haut par rapport à celle de la densité 30. La médiane pour 90 cibles se situe autour de 999 ms, contre 911 ms pour 30 cibles. L'ensemble du corps de la boîte (entre le 1er et le 3e quartile) suit le même décalage, ce qui représente un ralentissement général d'environ 80 à 90 ms.
+
+**Explications :**
+
+Ce ralentissement avec une densité plus élevée s'explique par deux facteurs principaux :
+
+- **Recherche visuelle et temps de décision :** Avant de démarrer le mouvement, l'utilisateur doit identifier la cible parmi les autres disques présents à l'écran, qui agissent comme des distracteurs visuels. Avec 90 cibles, ce temps de traitement visuel et cognitif est plus long qu'avec seulement 30 cibles.
+- **Réduction de la taille effective (pour `Bubble` et `Rope`) :** Ces techniques sélectionnent la cible la plus proche, ce qui signifie que la zone d'activation de chaque cible correspond à sa cellule dans le diagramme de Voronoï. Quand la densité augmente, les cibles se rapprochent et ces cellules deviennent plus petites. D'après la loi de Fitts, une taille effective réduite augmente l'indice de difficulté (ID), ce qui oblige l'utilisateur à être plus prudent pour ne pas sélectionner une cible voisine par erreur.
+
+
+
+### Différence de temps de réponse selon la taille des cibles
+
+```{r}
+
+g_sizes <- ggplot(data = data, aes(x = Size, y = Time_ms, fill = Size)) + 
+  geom_boxplot() + 
+    scale_fill_brewer(palette = "Blues") +
+  theme_minimal()
+
+g_sizes <- g_sizes + 
+  theme(legend.position = "none")
+
+g_sizes <- g_sizes + 
+  labs(
+    title = "Temps de réponse selon la taille des cibles",
+    x = "Taille de la cible (Pixels)",
+    y = "Temps de réponse (ms)"
+  )
+
+g_sizes
+```
+
+
+**Ce que l'on observe :**
+
+Le boxplot montre une différence claire entre les deux tailles de cibles. La boîte correspondant aux petites cibles (taille 8) est positionnée plus haut que celle des grandes cibles (taille 18). La médiane pour la taille 8 est d'environ 1001 ms, contre 919 ms pour la taille 18. La boîte de la taille 8 est aussi plus étendue verticalement (écart interquartile plus grand), ce qui indique une plus grande variabilité des temps de réponse pour les petites cibles.
+
+**Explications :**
+
+- **Loi de Fitts :** Le temps de pointage est inversement proportionnel à la taille de la cible. Une cible de 8 pixels a un indice de difficulté (ID) plus élevé qu'une cible de 18 pixels, ce qui se traduit directement par des temps de sélection plus longs.
+- **Phase de décélération :** Les petites cibles demandent une plus grande précision motrice en fin de mouvement. L'utilisateur doit ralentir davantage dans la phase d'approche pour ne pas dépasser la cible, ce qui allonge le temps total et génère plus de variabilité entre les essais. À l'inverse, une grande cible tolère un mouvement plus direct et rapide, sans besoin d'ajustements fins.
+
+
+
+
+
+
+
+### Différence de temps de réponse entre techniques et densités
+
+#### Boxplot : Technique × Densité
+
+
+```{r}
+g_tech_dens <- ggplot(data = data, aes(x = Technique, y = Time_ms, fill = Density)) + 
+  geom_boxplot() + 
+  theme_minimal()
+
+g_tech_dens <- g_tech_dens + 
+  theme(legend.position = "right") 
+
+g_tech_dens <- g_tech_dens + 
+  labs(
+    title = "Temps de réponse par Technique et Densité",
+    x = "Technique de pointage",
+    y = "Temps de réponse (ms)",
+    fill = "Densité" # Change le titre de la légende
+  )
+
+g_tech_dens
+```
+
+
+**Ce que l'on observe :**
+
+Le boxplot montre que la densité n'a pas le même effet selon la technique utilisée. Pour `Normal`, les deux boîtes (densité 30 et densité 90) sont au même niveau, avec des médianes stables autour de 1380 ms. L'encombrement de l'écran ne modifie pas la distribution des temps de réponse.
+
+Pour `Bubble` et `Rope` en revanche, la boîte correspondant à la densité 90 est clairement décalée vers le haut par rapport à celle de la densité 30. La médiane augmente d'environ 100 ms (de 750-790 ms à 860-880 ms) quand la densité passe de 30 à 90.
+
+**Explications :**
+
+- **`Normal` non affecté par la densité :** Avec un curseur classique, la taille physique de la cible ne change pas selon le nombre de cibles à l'écran. La surface sur laquelle il faut cliquer reste identique, donc l'indice de difficulté (ID) reste constant quelle que soit la densité.
+- **`Bubble` et `Rope` sensibles à la densité :** Ces techniques sélectionnent la cible la plus proche, donc la zone d'activation de chaque cible correspond à sa cellule de Voronoï. Quand la densité augmente, les cibles se rapprochent et ces cellules se réduisent. D'après la loi de Fitts, cette réduction de la taille effective augmente l'ID, ce qui rallonge le temps de pointage.
+
+***
+#### Courbes des moyennes : Interaction Technique × Densité
+
+```{r}
+
+data_tech_dens <- data %>%
+  group_by(Technique, Density) %>%
+  summarise(mean_time = mean(Time_ms), .groups = "drop")
+
+g_tech_dens_line <- ggplot(data_tech_dens, aes(x = Density, y = mean_time, 
+                                                 color = Technique, group = Technique)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  theme_minimal()
+
+g_tech_dens_line <- g_tech_dens_line +
+  scale_color_brewer(palette = "Set2")
+
+g_tech_dens_line <- g_tech_dens_line +
+  labs(
+    title = "Interaction Technique × Densité",
+    x = "Densité",
+    y = "Temps de réponse moyen (ms)",
+    color = "Technique"
+  )
+
+g_tech_dens_line
+```
+
+**Ce que l'on observe :**
+
+Le graphique en lignes confirme les observations du boxplot. La courbe de `Normal` reste presque horizontale autour de 1725 ms, sans variation notable entre les deux densités. Les courbes de `Bubble` et `Rope` sont beaucoup plus basses (autour de 1000 ms) mais montrent une pente ascendante claire : le temps moyen de `Bubble` passe de 1019 ms à 1098 ms, et celui de `Rope` de 992 ms à 1121 ms entre densité 30 et densité 90.
+
+**Explications :**
+
+- **Stabilité de `Normal` :** La courbe plate confirme que la densité des distracteurs n'impacte pas la contrainte motrice du curseur classique. L'utilisateur doit toujours viser la même surface réelle, donc l'ID reste constant.
+- **Sensibilité de `Bubble` et `Rope` :** La pente ascendante de ces deux courbes illustre directement l'effet de la densité sur la taille effective des cibles. Plus les cibles sont nombreuses, plus les zones de Voronoï se resserrent, ce qui augmente la difficulté motrice et allonge les temps moyens.
+
+
+### Différence de temps de réponse entre techniques et tailles de cibles
+
+#### Boxplot : Technique × Taille de cible
+
+
+```{r}
+g_tech_size <- ggplot(data = data, aes(x = Technique, y = Time_ms, fill = Size)) + 
+  geom_boxplot() + 
+  theme_minimal()
+
+g_tech_size <- g_tech_size + 
+  theme(legend.position = "right") 
+
+g_tech_size <- g_tech_size + 
+  labs(
+    title = "Temps de réponse par Technique et Taille de cible",
+    x = "Technique de pointage",
+    y = "Temps de réponse (ms)",
+    fill = "Taille (Pixels)"
+  )
+
+g_tech_size
+```
+
+
+**Ce que l'on observe :**
+
+Le boxplot montre que la taille des cibles a un effet très différent selon la technique. Pour `Normal`, la boîte de la taille 8 est positionnée bien plus haut (médiane autour de 1566 ms) et est beaucoup plus étendue (de 1207 ms à plus de 2500 ms), ce qui indique une forte variabilité. La boîte de la taille 18 pour cette même technique est nettement plus basse (médiane sous 1200 ms) et plus compacte.
+
+Pour `Bubble` et `Rope`, l'écart entre les deux tailles est très faible. Les médianes restent proches (882 ms contre 801 ms pour `Bubble`, et 821 ms contre 782 ms pour `Rope`), et les distributions des deux tailles se superposent presque entièrement.
+
+**Explications :**
+
+- **Effet de la taille sur `Normal` (loi de Fitts) :** Avec un curseur classique, l'utilisateur doit amener le pointeur à l'intérieur de la cible. Une cible de 8 pixels laisse très peu de marge d'erreur, ce qui oblige à ralentir fortement en fin de mouvement. Cela allonge le temps de pointage et génère de la variabilité entre les essais. Une cible de 18 pixels est plus tolérante et permet un mouvement plus direct.
+- **Indépendance de `Bubble` et `Rope` vis-à-vis de la taille visuelle :** Ces techniques sélectionnent la cible la plus proche, donc la zone d'activation correspond à la cellule de Voronoï, indépendamment de la taille affichée à l'écran. Que la cible mesure 8 ou 18 pixels, l'espace moteur disponible reste le même, ce qui explique la stabilité des temps. La légère différence résiduelle s'explique par le fait qu'une grande cible est un peu plus rapide à identifier visuellement.
+
+
+***
+#### Courbes des moyennes : Interaction Technique × Taille
+
+```{r}
+data_tech_size <- data %>%
+  group_by(Technique, Size) %>%
+  summarise(mean_time = mean(Time_ms), .groups = "drop")
+
+g_tech_size_line <- ggplot(data_tech_size, aes(x = Size, y = mean_time,
+                                                color = Technique, group = Technique)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  theme_minimal()
+
+g_tech_size_line <- g_tech_size_line +
+  scale_color_brewer(palette = "Set2")
+
+g_tech_size_line <- g_tech_size_line +
+  labs(
+    title = "Interaction Technique × Taille de cible",
+    x = "Taille (Pixels)",
+    y = "Temps de réponse moyen (ms)",
+    color = "Technique"
+  )
+
+g_tech_size_line
+```
+
+
+
+**Ce que l'on observe :**
+
+Les courbes confirment et précisent les observations du boxplot. La courbe de `Normal` a une pente descendante marquée : le temps moyen passe de 1941 ms pour la taille 8 à 1563 ms pour la taille 18, soit une différence de près de 380 ms. Les courbes de `Bubble` et `Rope` sont beaucoup plus basses et presque horizontales. Le gain de temps entre taille 8 et taille 18 est seulement d'environ 115 ms pour `Bubble` et 48 ms pour `Rope`.
+
+**Explications :**
+
+- **Effet d'interaction confirmé :** La différence de pente entre les courbes montre clairement que la taille visuelle de la cible a un impact important sur `Normal`, mais très faible sur `Bubble` et `Rope`. C'est un effet d'interaction classique entre technique et taille.
+- **Caractère *target agnostic* de `Bubble` et `Rope` :** La quasi-horizontalité de ces deux courbes confirme que la sélection par proximité compense la contrainte de précision. La taille affichée à l'écran n'influe pas sur la difficulté motrice réelle, ce qui maintient les performances stables même pour de petites cibles.
+- **Légère pente résiduelle :** Même si la difficulté motrice est identique pour les deux tailles, une cible de 18 pixels est visuellement plus facile à repérer et à valider. Ce petit écart s'explique donc par le temps de traitement visuel, et non par la contrainte motrice.
+
+
+
+## Conclusion
+
+L'analyse de ces données expérimentales confirme l'avantage ergonomique des techniques d'expansion visuelle et motrice par rapport au pointage traditionnel.
+
+Les techniques Bubble et Rope se sont révélées systématiquement plus rapides que le curseur Normal, tout en annulant presque totalement l'impact négatif lié aux petites cibles prédit par la loi de Fitts. La taille d'affichage n'a que très peu d'impact sur ces techniques puisque la zone d'activation réelle (la cellule de Voronoï) reste maximisée.
+
+En revanche, ces techniques target-agnostic montrent leurs limites dans des environnements très denses : l'augmentation du nombre de cibles à l'écran (densité 90) réduit l'espace des cellules de Voronoï, ce qui ralentit l'utilisateur. À l'inverse, le curseur Normal est indifférent à la densité visuelle, mais reste lourdement pénalisé par la contrainte de précision motrice exigée par les petites cibles.
+
+En conclusion, le choix d'une technique de pointage doit s'adapter au contexte de l'interface : Bubble ou Rope sont idéales pour des interfaces aérées, tandis qu'un comportement de sélection classique reste pertinent si les éléments interactifs sont extrêmement rapprochés.
+
+
+
+
+
