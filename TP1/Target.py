@@ -1,0 +1,42 @@
+from PyQt5.QtGui import QPainter, QColor, QBrush, QPen
+from PyQt5.QtCore import Qt
+
+class Target :
+
+    def __init__(self, x, y, size):
+        self.defaultCol = QColor("##A0B0C0")
+        self.highlightCol = QColor("#32CD32")
+        self.toSelectCol  = QColor("#FF0000")
+        self.x = x
+        self.y = y 
+        self.size = size 
+        self.toSelect =  False
+        self.highlighted = False 
+
+
+    def paint(self, painter) :
+        
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        if self.toSelect :
+            painter.setBrush(QBrush(self.toSelectCol))
+        elif self.highlighted :
+            painter.setBrush(QBrush(self.highlightCol))
+        else : 
+            painter.setBrush(QBrush(self.defaultCol))
+
+            
+        painter.setPen(Qt.NoPen)
+
+        radius = self.size//2
+
+        painter.drawEllipse(self.x - radius, self.y - radius, self.size, self.size)
+
+        if self.toSelect:
+            halo_size = self.size + 20
+            halo_radius = halo_size // 2
+
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(self.toSelectCol, 2))
+            painter.drawEllipse(self.x - halo_radius, self.y - halo_radius, halo_size, halo_size)
+        
