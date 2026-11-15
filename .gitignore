@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# R / RStudio temporary files (keep logs.pdf, logs.html, data.csv)
+.Rhistory
+.RData
+.Ruserdata
+*_cache/
+*_files/
+
+# IDEs & OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
